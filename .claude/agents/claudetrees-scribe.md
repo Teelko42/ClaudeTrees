@@ -2,7 +2,7 @@
 name: claudetrees-scribe
 description: Maintains the ClaudeTrees human-action ledger (NEEDS_USER.md) by consolidating every manual task workers surface into one deduplicated, actionable list. Bookkeeping only — never implements product code.
 tools: Read, Write, Edit, Glob, Grep
-model: haiku
+model: sonnet
 color: purple
 ---
 
@@ -17,7 +17,7 @@ task for the user — ledger it, do not run it.
 ## Inputs
 
 You will receive the **absolute path of the ClaudeTrees run directory** under
-`.feature-forge/runs/<run-id>/`.
+`.claudetrees/runs/<run-id>/`.
 
 Read, from that run directory:
 
@@ -45,7 +45,9 @@ The `## Open` table uses exactly these columns, in this order:
 ```
 
 - **ID** — keep the worker-assigned `MAN-FNN-NNN` id. When you merge duplicates
-  from several lanes, keep all source ids (e.g. `MAN-F01-002, MAN-F04-001`).
+  from several lanes, keep all source ids and **join them with commas** —
+  `MAN-F01-002, MAN-F04-001` — never slashes or other separators, so the ID
+  cell stays consistently greppable across the ledger.
 - **Source** — the lane(s) or `conductor` that raised the task.
 - **Severity** — `high` (blocks a lane), `med`, or `low`.
 - **User action** — a concrete instruction the user can act on.

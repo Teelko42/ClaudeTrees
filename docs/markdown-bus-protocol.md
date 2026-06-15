@@ -3,8 +3,9 @@
 ClaudeTrees coordinates a conductor and several background workers using nothing
 but markdown files in a shared **run directory**. There is no database and no
 server — the filesystem is the message bus. This document defines every bus
-file, who reads and writes it, and the rules background workers must follow to
-reach the bus from inside an isolated worktree.
+file, who reads and writes it, and how workers reach the bus — by relative path
+in the shared tree by default, or by absolute path when a lane opts into an
+isolated worktree.
 
 ## Run Directory
 
@@ -36,20 +37,26 @@ tree and is committed by the conductor at integration.
       ...
 ```
 
-## Absolute Paths and `--add-dir` (the most important rule)
+## Reaching the bus: shared tree by default, worktree is opt-in
 
-Background workers run with **`isolation: worktree`** — Claude checks each
-worker out into its own git worktree before it edits code. That worktree does
-**not** contain the git-ignored `.claudetrees/` workspace, so a worker cannot
-reach the bus with a relative path. Two rules make the bus reachable:
+Workers run in the **shared working tree by default** (the `claudetrees-worker`
+agent does *not* set `isolation: worktree`). Because lanes own disjoint files,
+a worker writes its product files and reaches the bus by a plain **relative
+path** with zero collision risk. This is the blessed practice — both prior runs
+disabled worktree isolation precisely because the lanes own disjoint directories.
 
-1. **Always address bus files by absolute path** in the worker prompt
+**Opt a lane into worktree isolation only** when it genuinely risks editing files
+another lane owns. A worktree does **not** contain the git-ignored `.claudetrees/`
+workspace, so the moment you opt in, the bus is no longer reachable by relative
+path. Two rules then apply (and only then):
+
+1. **Address bus files by absolute path** in the worker prompt
    (`$RUN_DIR/IDEA.md`, never `./IDEA.md`).
-2. **Always pass `--add-dir "$RUN_DIR"`** when launching a background session so
-   the run directory is granted to the session regardless of its worktree.
+2. **Pass `--add-dir "$RUN_DIR"`** when launching the session so the run
+   directory is granted regardless of the worktree.
 
-The conductor resolves `$RUN_DIR` to an absolute path once and reuses it in
-every prompt.
+The conductor resolves `$RUN_DIR` to an absolute path once either way, so it is
+ready the moment a lane needs it.
 
 ## Bus Files
 
@@ -61,10 +68,11 @@ every prompt.
 | `FEATURES.md` | `claudetrees-idea-splitter` (or conductor) | all workers, scribe | One section per lane: goal, value, files, dependencies, out-of-scope, done-when. |
 | `DISPATCH.md` | conductor | conductor, user | One row per background session: Feature, Worker name, Session id, Status, Worktree/branch, Last update. |
 | `STATUS.md` | conductor | conductor, user | Overall run state + dated timeline. Workers do **not** edit this. |
-| `INTEGRATION.md` | conductor | conductor, user | What merged, what was skipped, conflicts resolved, build/test results. |
-| `NEEDS_USER.md` | `claudetrees-scribe` (consolidated); workers append rows | user, conductor | The single deduplicated manual-task ledger. |
+| `INTEGRATION.md` | conductor | conductor, user | What merged, what was skipped, conflicts resolved, build/test + seam-test results. |
+| `NEEDS_USER.md` | `claudetrees-scribe` (**sole** writer) | user, conductor | The single deduplicated manual-task ledger. Workers do **not** write it — they append to their own `MANUAL.md`. |
 | `DECISIONS.md` | conductor | all workers | Default decisions the conductor made; overridable by the user. Read-only for workers. |
 | `BLOCKERS.md` | conductor | conductor | Cross-lane blockers. Workers surface blockers in their own files; the conductor folds them in to avoid races. |
+| `CONTRACTS.md` | conductor | producer + consumer workers | Per-field meaning **and sentinel/edge-case values** of any data structure that crosses a lane seam. Created only when such a seam exists. Read-only for workers. |
 
 ### Per-feature files (`features/FNN-slug/`)
 
@@ -79,81 +87,127 @@ every prompt.
 
 ### Write-ownership summary (avoids races)
 
-- **Conductor** writes all global bus files except `NEEDS_USER.md` (shared with
-  the scribe) and seeds `IDEA.md`/`FEATURES.md`.
+- **Conductor** writes all global bus files except `NEEDS_USER.md`, and seeds
+  `IDEA.md`/`FEATURES.md`. It also owns `CONTRACTS.md` when a seam needs one.
 - **Workers** write only their own `features/FNN-slug/` files and their lane's
-  product files. They **append** rows to `NEEDS_USER.md` but never edit the
-  other global bus files.
-- **Scribe** owns the consolidated body of `NEEDS_USER.md` (dedup, source links,
-  keeping open tasks actionable).
+  product files. They append manual tasks to their **own** `MANUAL.md` only, and
+  never write any global bus file (no global `NEEDS_USER.md` append — that was a
+  concurrent-write race; one private writer per file is the whole point).
+- **Scribe** is the **sole** writer of `NEEDS_USER.md` — it consolidates every
+  lane's `MANUAL.md` into it (dedup, source links, keeping open tasks
+  actionable). Because only the scribe writes that file, there is no append race.
 
 ## Manual-Task IDs
 
 Manual tasks use stable IDs `MAN-FNN-NNN` (lane number, then a zero-padded
-sequence within that lane, e.g. `MAN-F02-001`). A worker appends the row to both
-its local `MANUAL.md` and the global `NEEDS_USER.md`; the scribe deduplicates.
-Row format:
+sequence within that lane, e.g. `MAN-F02-001`). A worker appends the row to its
+local `MANUAL.md` **only**; the scribe reads every `MANUAL.md` and consolidates
+into `NEEDS_USER.md`, keeping all merged source ids comma-separated. Row format:
 
 ```markdown
 | MAN-F02-001 | F02 | low | Confirm local `claude` CLI background-launch syntax | Background dispatch command must be verified on this machine | Does not block (foreground fallback exists) | open |
 ```
 
-## Launching Background Workers
+## Shared Data Contracts and Seam Tests
 
-The conductor launches one background session per lane with the
-`claudetrees-worker` agent, plus one for `claudetrees-scribe`.
+The bus pins shared **names** for free (an agent name or file path written into
+`FEATURES.md` before fan-out is a non-blocking reference). It does **not**
+automatically pin shared **semantics**, and that gap is the root cause of this
+project's one real integration defect: two lanes agreed on a field's *name*
+(`supersedes`) but not its *meaning*. One lane used a self-reference
+(`supersedes === segment_id`) as a "self-finalize" sentinel; the other read any
+non-null value as "this corrects a prior segment" and produced no output. Both
+lanes' unit suites passed because each private fixture defaulted the edge case
+away — a false green that only surfaced at integration.
 
-### Windows PowerShell
+A **shared data contract** — a record or value one lane produces and another
+interprets — is therefore a real interface, not a name-only reference, and gets
+three things:
 
-```powershell
-$RUN_DIR = Join-Path (Get-Location) ".claudetrees\runs\<run-id>"
+1. **`CONTRACTS.md`** (conductor-owned, from `CONTRACTS.template.md`): for every
+   shared field, its meaning **and its sentinel / edge-case values** (what
+   `null`, empty, a self-reference, or an out-of-range value means). This is the
+   single source of truth both lanes implement against.
+2. **A blocking seam, not a name-only reference.** Every producer and consumer
+   lane is listed, and the dependency is declared in each lane's `FEATURE.md` /
+   `PLAN.md` as blocking (the consumer integrates after the producer).
+3. **One shared fixture, including the adversarial edge case.** Both lanes test
+   against the *same* fixture so neither can dodge the disagreement with a
+   private default. At integration the conductor runs this fixture against both
+   the producer's and the consumer's code (the **seam test**); a seam that only
+   passes each lane's own fixture is not verified.
 
-claude --bg `
-  --agent claudetrees-worker `
-  --name "ct-F02-worker-dispatcher" `
-  --add-dir "$RUN_DIR" `
-  "You are implementing feature F02. Shared run directory: $RUN_DIR. Read $RUN_DIR\IDEA.md, $RUN_DIR\FEATURES.md, $RUN_DIR\DECISIONS.md, and $RUN_DIR\features\F02-worker-dispatcher\PLAN.md. Implement only your lane. Update your features\F02-worker-dispatcher\STATUS.md, MANUAL.md, and RESULT.md. Do not edit global bus files."
+If no data structure crosses a seam, there is no `CONTRACTS.md` — name-only
+references remain non-blocking and need none of this.
+
+## Launching Workers
+
+The conductor launches one `claudetrees-worker` per lane, plus one
+`claudetrees-scribe`. **Lead with the harness-native paths** — they work here
+today. The `claude --bg` CLI launcher is an optional convenience that many CLI
+versions do not support (see the footnote), so it is *not* the primary path.
+
+### Primary — the `Agent` tool
+
+Invoke each `claudetrees-worker` as a subagent through the **`Agent`** tool. To
+run independent lanes in parallel, send several `Agent` calls in one message.
+Workers run in the shared tree, so the bus is reachable by relative path:
+
+```text
+You are implementing feature F02. Run directory: <RUN_DIR>.
+Read IDEA.md, FEATURES.md, DECISIONS.md, CONTRACTS.md (if present), and
+features/F02-worker-dispatcher/PLAN.md. Implement only your lane. Update your
+features/F02-worker-dispatcher/STATUS.md, MANUAL.md, and RESULT.md. Do not edit
+the global bus files.
 ```
 
-### bash fallback
+Run `claudetrees-scribe` the same way (after the workers, or after each batch):
+
+```text
+Run directory: <RUN_DIR>. Read every features/*/MANUAL.md, STATUS.md, and
+RESULT.md. Update NEEDS_USER.md: consolidate duplicates (keep all source ids,
+comma-separated), preserve source links, keep open tasks actionable. You are the
+only writer of NEEDS_USER.md. Do not implement code.
+```
+
+(If you opted a lane into `isolation: worktree`, address the bus by absolute
+path — `$RUN_DIR/IDEA.md` — and add `--add-dir "$RUN_DIR"`; see the opt-in rule
+above.)
+
+### Alternative — the `Workflow` tool (deterministic fan-out)
+
+For lane ordering (a producer→consumer seam) or structured returns, drive the
+workers with the **`Workflow`** tool: one `agent()` call per lane with
+`agentType: 'claudetrees-worker'`, `parallel()` for independent lanes and
+`pipeline()` for a seam. Each lane's structured return can stand in for its
+`RESULT.md`; the seam fixture runs as a verification stage. `FNN` numbering,
+`CONTRACTS.md`, the seam test, and reviewed integration all still apply.
+
+## Footnote — `claude --bg` CLI launch (only if your CLI supports it)
+
+Some `claude` CLI versions expose a scriptable background launcher:
 
 ```bash
 RUN_DIR="$(pwd)/.claudetrees/runs/<run-id>"
-
-claude --bg \
-  --agent claudetrees-worker \
-  --name "ct-F02-worker-dispatcher" \
-  --add-dir "$RUN_DIR" \
-  "You are implementing feature F02. Shared run directory: $RUN_DIR. Read $RUN_DIR/IDEA.md, $RUN_DIR/FEATURES.md, $RUN_DIR/DECISIONS.md, and $RUN_DIR/features/F02-worker-dispatcher/PLAN.md. Implement only your lane. Update your features/F02-worker-dispatcher/STATUS.md, MANUAL.md, and RESULT.md. Do not edit global bus files."
+claude --bg --agent claudetrees-worker --name "ct-F02-worker-dispatcher" \
+  --add-dir "$RUN_DIR" "<the worker prompt above, with absolute $RUN_DIR paths>"
 ```
 
-### Launching the scribe
-
-```bash
-claude --bg \
-  --agent claudetrees-scribe \
-  --name "ct-scribe" \
-  --add-dir "$RUN_DIR" \
-  "Shared run directory: $RUN_DIR. Monitor every features/*/MANUAL.md, STATUS.md, and RESULT.md until all workers are complete, blocked, or failed. After each pass, update $RUN_DIR/NEEDS_USER.md: consolidate duplicates, preserve source links, keep open tasks actionable. Do not implement code."
-```
-
-## CLI Caveat — there may be no `--bg` flag
-
-**Real-world note:** some `claude` CLI versions have **no `--bg` flag**. On those
-versions, `claude agents` is an *interactive* view for managing background agents
-— it is not a scriptable one-shot launcher, so the `claude --bg ...` commands
-above will not work verbatim. The exact background-launch syntax must be verified
-on the local machine (track this as a manual task, e.g. `MAN-F02-001`).
-
-When background launch is unavailable, use the **foreground-subagent fallback**:
-the conductor invokes `claudetrees-worker` (and later `claudetrees-scribe`) as
-normal subagents through the `Agent`/`Task` tool, one lane at a time or as the
-harness permits. Workers still read and write the same absolute bus files, so the
-protocol is unchanged — only the launch mechanism differs. In the harness-native
-background path, the existing worktree-isolation mechanism provides the
-concurrency that `--bg` would otherwise provide.
+Many versions do **not** — on those, `claude agents` is only an *interactive*
+view, not a one-shot launcher, so the command above will not work verbatim. Both
+prior runs found `--bg` unavailable and used the `Agent`-tool path. If you want
+`--bg` on this machine, verify the exact syntax first and track it as a manual
+task (e.g. `MAN-F02-001`); otherwise just use the harness-native paths above —
+the bus protocol is identical, only the launch mechanism differs.
 
 ## Monitoring
+
+The bus **is** the dashboard and is always available: tail the global
+`STATUS.md` and `DISPATCH.md`, and each `features/FNN-slug/STATUS.md`. A
+`Workflow`-tool run also exposes its own per-lane progress view.
+
+If this CLI exposes background-agent commands they help too — skip any that error
+(they depend on CLI support):
 
 ```bash
 claude agents              # interactive background-agent view
@@ -162,12 +216,12 @@ claude logs <session-id>
 claude stop <session-id>
 ```
 
-The bus itself is also the dashboard: tail the global `STATUS.md`, `DISPATCH.md`,
-and each `features/FNN-slug/STATUS.md`.
-
 ## Integration
 
 The conductor never auto-merges blindly. At integration it reads every
 `RESULT.md`, reviews `NEEDS_USER.md`, inspects each worker's branch/worktree,
-resolves conflicts one lane at a time, runs tests/build, writes the top-level
-`README.md` and final wiring, and records the outcome in `INTEGRATION.md`.
+**runs the seam test** for any `CONTRACTS.md` contract (the shared fixture,
+adversarial edge case included, against both the producer's and consumer's code)
+before merging that seam, resolves conflicts one lane at a time, runs
+tests/build, writes the top-level `README.md` and final wiring, and records the
+outcome — seam-test result included — in `INTEGRATION.md`.

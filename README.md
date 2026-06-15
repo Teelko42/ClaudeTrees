@@ -56,6 +56,7 @@ slices the idea, launches workers, and reports how to monitor them.
       STATUS.template.md
       NEEDS_USER.template.md
       MANUAL.template.md
+      CONTRACTS.template.md        # shared data-contract seam (when one exists)
   agents/
     claudetrees-idea-splitter.md   # idea  -> independent lanes
     claudetrees-worker.md          # implements exactly one lane
@@ -81,18 +82,24 @@ the conductor and the workers:
 | `NEEDS_USER.md` | consolidated human-action ledger |
 | `DECISIONS.md` | conductor defaults (override any) |
 | `BLOCKERS.md` | cross-lane blockers / races |
+| `CONTRACTS.md` | shared data-contract semantics + edge cases (only when a structure crosses a lane seam) |
 | `features/FNN-slug/` | per-lane `FEATURE`, `PLAN`, `STATUS`, `NOTES`, `MANUAL`, `RESULT` |
 
 See `docs/markdown-bus-protocol.md` for the full reader/writer contract.
 
-## Background launch note
+## How workers are launched
 
-Background workers are launched with the `claude` CLI using absolute paths and
-`--add-dir "$RUN_DIR"` so isolated sessions can still reach the shared bus.
-Some `claude` CLI versions have **no `--bg` flag** and instead manage background
-agents through the interactive `claude agents` view; a foreground-subagent
-fallback also works. The conductor and `docs/markdown-bus-protocol.md` document
-all three paths.
+Workers run as **harness-native subagents** — the conductor launches each
+`claudetrees-worker` through the `Agent` tool (several in one message to run
+lanes in parallel), or drives them with the `Workflow` tool when lanes have an
+ordering dependency or you want structured returns. Workers run in the **shared
+working tree** and reach the bus by relative path; worktree isolation is opt-in,
+used only when a lane risks editing another lane's files (then the bus is
+addressed by absolute path with `--add-dir "$RUN_DIR"`).
+
+Some `claude` CLI versions also expose a scriptable `claude --bg` launcher, but
+many do not — so it is an optional convenience, not the primary path. The
+conductor and `docs/markdown-bus-protocol.md` document all of these.
 
 ---
 

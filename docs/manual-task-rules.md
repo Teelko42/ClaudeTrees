@@ -74,8 +74,9 @@ Example: the first manual task raised by lane F02 is `MAN-F02-001`; its second
 is `MAN-F02-002`.
 
 When the scribe merges duplicate tasks from several lanes into one ledger row,
-it **keeps every source id** in the `ID` cell (e.g. `MAN-F01-002, MAN-F04-001`)
-so each lane's reference remains intact.
+it **keeps every source id** in the `ID` cell, **comma-separated**
+(`MAN-F01-002, MAN-F04-001` — always commas, never slashes), so each lane's
+reference remains intact and the ledger stays greppable.
 
 ## Severity and status
 

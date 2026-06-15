@@ -24,7 +24,7 @@ You will receive:
   sibling skills/agents, languages, build tooling). Use `Bash` only for
   read-only inspection (e.g. listing files). Do not modify anything.
 - **Run dir** — the absolute path of the shared run directory under
-  `.feature-forge/runs/<run-id>/`. This is where your output is written
+  `.claudetrees/runs/<run-id>/`. This is where your output is written
   (as `FEATURES.md`) and where lane folders will later live.
 
 Before slicing, scan the repo so your "Likely files" are real paths in the
@@ -42,6 +42,11 @@ Structure:
    are, that they are independent, and how file ownership is namespaced so
    workers do not collide. Name any cross-lane name-only dependencies up front.
 2. One `## FNN: <name>` block per lane.
+3. A `## Shared Contracts` section **only if** a data structure crosses a lane
+   seam (one lane produces a record/value another lane interprets). For each such
+   contract, name it, list its producer and consumer lanes, and state that it is
+   a **blocking seam** the conductor must pin in `CONTRACTS.md` with a shared
+   fixture. Omit this section entirely when every cross-lane link is name-only.
 
 Each lane block MUST include exactly these fields, in this order:
 
@@ -65,10 +70,13 @@ Field meanings:
   result they can see or use.
 - **Likely files** — a bullet list of the exact files/paths this lane owns
   exclusively. Real paths in the real repo layout.
-- **Dependencies** — `none` for leaf lanes, or a named reference to another
-  lane (e.g. "references agent name `foo` from F02"). Prefer name-only
-  references over shared-file edits; only declare a hard ordering dependency
-  when two lanes genuinely cannot proceed in parallel.
+- **Dependencies** — `none` for leaf lanes, or one of: a **name-only reference**
+  (non-blocking, e.g. "references agent name `foo` from F02"); a **shared data
+  contract** (blocking seam, e.g. "shares the `Segment` contract with F04 — see
+  CONTRACTS.md"); or a hard **ordering dependency** ("must follow F02"). Prefer
+  name-only references. Only call something a shared data contract when one lane
+  produces a structure another lane interprets — and then flag it as a seam, not
+  a name-only reference (see Splitting rules).
 - **Collision risk** — `none` when ownership is exclusive; otherwise name the
   shared file and how the risk is mitigated (or fold the lanes together).
 - **Manual user tasks likely** — anything the user must do by hand (install a
@@ -86,6 +94,17 @@ Field meanings:
   another lane's files. Name-only references (one lane mentions another lane's
   agent/file name that is fixed in FEATURES) are allowed and are NOT a blocking
   dependency.
+- **A shared data contract is NOT a name-only reference.** If one lane produces a
+  data structure (a record, a JSON shape, a return value) that another lane reads
+  and *interprets*, agreeing on the field *name* does not make the lanes agree on
+  its *meaning* — especially edge/sentinel values (what `null`, empty, or a
+  self-reference means). That is a real interface and a **blocking seam**: list
+  every producer and consumer lane, put it in the `## Shared Contracts` section,
+  and say it must be pinned in `CONTRACTS.md` (field meanings + edge cases) and
+  tested against one shared fixture before integration. Treating such a seam as a
+  mere name-only reference is exactly how a green build still breaks at the seam.
+  Prefer redesigning the split so the structure does not cross the seam at all;
+  only pin a contract when it genuinely must.
 - **Low file overlap**: assign each file to exactly one lane. Lanes own
   disjoint sets of files. If two candidate lanes both want the same file,
   either (a) move that file into a shared setup lane (`F00`), (b) merge the two

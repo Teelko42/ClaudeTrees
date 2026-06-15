@@ -69,13 +69,19 @@ key off it.
 
 ## How dependencies are expressed
 
-Most lanes should be `Dependencies: none`. There are two kinds of cross-lane
-relationship, and only one of them blocks:
+Most lanes should be `Dependencies: none`. There are three kinds of cross-lane
+relationship; the last two block:
 
 - **Name-only reference (non-blocking).** Lane B mentions a fixed name that
   lane A owns — an agent name, a template path. Because the name is written
   into FEATURES before any worker starts, B can be built in parallel. Express
   it as: `Dependencies: references <name> from FNN`. This does NOT make B wait.
+- **Shared data contract (blocking seam).** Lane A produces a data structure
+  (a record, a JSON shape, a return value) that lane B reads and *interprets*.
+  This is a real interface, not a name — see the next section. Express it as:
+  `Dependencies: shares the <Contract> contract with FNN (see CONTRACTS.md)`.
+  It blocks: the seam is pinned in `CONTRACTS.md` and tested against one shared
+  fixture before integration.
 - **Ordering dependency (blocking).** Lane B cannot start until lane A's output
   physically exists. Avoid these where possible; when unavoidable, state it in
   the FEATURES intro AND in B's field: `Dependencies: must follow FNN`. The
@@ -83,6 +89,41 @@ relationship, and only one of them blocks:
 
 `Collision risk` is separate from dependencies: it describes shared-file
 danger, and should read `none — exclusive ownership` for a clean split.
+
+## Name-only reference vs shared data contract
+
+This distinction is load-bearing — collapsing the two is what shipped this
+project's one real integration bug.
+
+- A **name-only reference** is safe to leave non-blocking: lane B calls
+  `fetch_weather` by name, or points at `docs/a.md`. The *name* is fixed in
+  FEATURES up front, nothing about its meaning is ambiguous, and B never waits.
+- A **shared data contract** is NOT name-only. When lane A produces a value that
+  lane B must interpret, agreeing on the field *name* does not make them agree on
+  its *meaning* — especially its edge and sentinel values. That agreement is a
+  real interface and must be pinned and tested, not assumed.
+
+**The cautionary tale (INV-8).** Two lanes shared a `supersedes` field. The
+producer set `supersedes = segment_id` (a self-reference) to mean "this final
+closes its own partial." The consumer read `supersedes !== null` as "this
+corrects a prior segment" and routed it away, so **no output was ever produced**.
+Both honored the shared *name*; the build still broke. Worse, the consumer's unit
+tests **passed**, because its fixture defaulted `supersedes: null` and never
+exercised the self-reference — a false green.
+
+So when a split has a shared data contract, the splitter must:
+
+1. **Flag it as a seam, not a name-only reference** — list every producer and
+   consumer lane, and mark the dependency blocking.
+2. **Hand it to `CONTRACTS.md`** — every shared field's meaning *and* its
+   sentinel / edge-case values (what `null`, empty, or a self-reference means).
+3. **Require one shared fixture** — including the adversarial edge case — that
+   both lanes test against, so a private fixture cannot dodge the disagreement.
+   The conductor runs it as a **seam test** before integrating the seam.
+
+A clean split has no shared data contracts at all — prefer redesigning a seam
+into disjoint ownership with a name-only reference where you can. Only pin a
+contract when a data structure genuinely must cross the seam.
 
 ## Worked example
 
